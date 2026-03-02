@@ -844,9 +844,17 @@ class NEARWalletManager(private val context: Context) {
             if (url.contains("ledger-executor.js")) {
                 return try {
                     val inputStream = context.assets.open("ledger-executor.js")
+                    val headers = mapOf(
+                        "Access-Control-Allow-Origin" to "*",
+                        "Access-Control-Allow-Methods" to "GET, OPTIONS",
+                        "Access-Control-Allow-Headers" to "*",
+                    )
                     WebResourceResponse(
                         "application/javascript",
                         "UTF-8",
+                        200,
+                        "OK",
+                        headers,
                         inputStream,
                     )
                 } catch (_: Exception) {
@@ -854,13 +862,28 @@ class NEARWalletManager(private val context: Context) {
                 }
             }
 
-            // Proxy cross-origin HTTPS requests to bypass CORS.
-            // The bridge page origin is https://near-connect-bridge.local which
-            // is synthetic (from loadDataWithBaseURL) and not recognized by any
-            // real server's CORS policy.
+            // Proxy cross-origin HTTPS GET requests that originate from the
+            // bridge page itself.  The bridge has a synthetic origin
+            // (near-connect-bridge.local from loadDataWithBaseURL) which real
+            // servers won't accept in CORS.
+            //
+            // We must NOT proxy requests that originate from wallet pages loaded
+            // inside near-connect sandboxed iframes — those need the WebView's
+            // native cookie jar, redirect handling, and network stack.
+            //
+            // Distinguish by Referer: bridge-page requests have an empty Referer,
+            // "https://near-connect-bridge.local/…", or "about:srcdoc" (the
+            // initial executor iframe before it navigates).  Wallet-page requests
+            // have the wallet's real HTTPS URL as Referer.
             val uri = request.url
             val host = uri.host?.lowercase() ?: ""
-            if (uri.scheme?.lowercase() == "https" &&
+            val referer = request.requestHeaders?.get("Referer") ?: ""
+            val isFromBridge = referer.isEmpty() ||
+                referer.startsWith("https://near-connect-bridge.local") ||
+                referer.startsWith("about:")
+
+            if (isFromBridge &&
+                uri.scheme?.lowercase() == "https" &&
                 host != "near-connect-bridge.local" &&
                 request.method?.uppercase() == "GET"
             ) {
@@ -1014,6 +1037,18 @@ class NEARWalletManager(private val context: Context) {
     private fun handleLedgerBLEAction(action: String, body: JSONObject, requestId: String) {
         Log.d(TAG, "handleLedgerBLEAction: $action id=$requestId")
 
+        // Guard: BLE operations need runtime permissions on Android 6+
+        if (action in listOf("scan", "connect", "exchange") && !hasBLEPermissions(context)) {
+            val missing = requiredBLEPermissions().filter { perm ->
+                androidx.core.content.ContextCompat.checkSelfPermission(
+                    context, perm,
+                ) != android.content.pm.PackageManager.PERMISSION_GRANTED
+            }
+            Log.e(TAG, "Missing BLE permissions: $missing")
+            respondToJS(requestId, error = "Bluetooth permissions not granted. Required: ${missing.joinToString()}")
+            return
+        }
+
         when (action) {
             "scan" -> {
                 ledgerBLE.startScanning()
@@ -1160,6 +1195,36 @@ class NEARWalletManager(private val context: Context) {
 
     companion object {
         private const val TAG = "NEARConnect"
+
+        /**
+         * Returns the runtime permissions required for Ledger BLE operations
+         * on the current API level.
+         *
+         * On Android 12+ (API 31): BLUETOOTH_SCAN, BLUETOOTH_CONNECT
+         * On Android 6–11 (API 23–30): ACCESS_FINE_LOCATION
+         */
+        fun requiredBLEPermissions(): List<String> {
+            return if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
+                listOf(
+                    android.Manifest.permission.BLUETOOTH_SCAN,
+                    android.Manifest.permission.BLUETOOTH_CONNECT,
+                )
+            } else {
+                listOf(android.Manifest.permission.ACCESS_FINE_LOCATION)
+            }
+        }
+
+        /**
+         * Check whether all required BLE permissions have been granted.
+         */
+        fun hasBLEPermissions(context: Context): Boolean {
+            return requiredBLEPermissions().all { perm ->
+                androidx.core.content.ContextCompat.checkSelfPermission(
+                    context,
+                    perm,
+                ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+            }
+        }
 
         // Expose utility methods as companion for convenience
         fun formatNEAR(yoctoNEAR: String): String {
