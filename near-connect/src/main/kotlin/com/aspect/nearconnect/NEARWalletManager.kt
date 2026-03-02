@@ -144,6 +144,12 @@ class NEARWalletManager(private val context: Context) {
 
     internal val popupWebViews = mutableListOf<WebView>()
 
+    /**
+     * The currently active popup WebView (wallet auth page).
+     * Observed by [WalletBridgeSheet] to render the popup within the Compose hierarchy.
+     */
+    val activePopup: MutableStateFlow<WebView?> = MutableStateFlow(null)
+
     // MARK: - Continuations
 
     private var signInContinuation: CancellableContinuation<NEARAccount>? = null
@@ -191,6 +197,7 @@ class NEARWalletManager(private val context: Context) {
             popup.destroy()
         }
         popupWebViews.clear()
+        activePopup.value = null
     }
 
     /**
@@ -960,19 +967,9 @@ class NEARWalletManager(private val context: Context) {
                 setBackgroundColor(android.graphics.Color.WHITE)
             }
 
-            val parent = view.parent as? ViewGroup
-            parent?.addView(
-                popup,
-                ViewGroup.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                ),
-            )
-            // Ensure popup renders on top and gets focus
-            popup.bringToFront()
-            popup.requestFocus()
-            parent?.requestLayout()
             popupWebViews.add(popup)
+            // Expose to Compose so WalletBridgeSheet renders it at the right z-level.
+            activePopup.value = popup
 
             val transport = resultMsg.obj as WebView.WebViewTransport
             transport.webView = popup
@@ -981,9 +978,7 @@ class NEARWalletManager(private val context: Context) {
         }
 
         override fun onCloseWindow(window: WebView) {
-            (window.parent as? ViewGroup)?.removeView(window)
-            popupWebViews.remove(window)
-            window.destroy()
+            dismissPopup(window)
         }
     }
 
@@ -997,9 +992,7 @@ class NEARWalletManager(private val context: Context) {
                 context.startActivity(Intent(Intent.ACTION_VIEW, url).apply {
                     addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 })
-                (view.parent as? ViewGroup)?.removeView(view)
-                popupWebViews.remove(view)
-                view.destroy()
+                dismissPopup(view)
                 return true
             }
             return false
@@ -1008,10 +1001,17 @@ class NEARWalletManager(private val context: Context) {
 
     private inner class PopupWebChromeClient : WebChromeClient() {
         override fun onCloseWindow(window: WebView) {
-            (window.parent as? ViewGroup)?.removeView(window)
-            popupWebViews.remove(window)
-            window.destroy()
+            dismissPopup(window)
         }
+    }
+
+    private fun dismissPopup(popup: WebView) {
+        (popup.parent as? ViewGroup)?.removeView(popup)
+        popupWebViews.remove(popup)
+        if (activePopup.value === popup) {
+            activePopup.value = null
+        }
+        popup.destroy()
     }
 
     private fun shouldOpenExternally(url: Uri): Boolean {

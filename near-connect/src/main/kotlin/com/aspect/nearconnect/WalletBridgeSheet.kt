@@ -43,6 +43,7 @@ fun WalletBridgeSheet(
     onDismiss: () -> Unit,
 ) {
     val isBridgeReady by walletManager.isBridgeReady.collectAsState()
+    val popup by walletManager.activePopup.collectAsState()
     var didTrigger by remember { mutableStateOf(false) }
 
     // Trigger connect flow when bridge is ready
@@ -80,6 +81,24 @@ fun WalletBridgeSheet(
             modifier = Modifier.fillMaxSize(),
         )
 
+        // Popup WebView (wallet auth page) — rendered on top of the bridge
+        val currentPopup = popup
+        if (currentPopup != null) {
+            AndroidView(
+                factory = { _ ->
+                    // Detach from previous parent if the popup was attached elsewhere
+                    (currentPopup.parent as? ViewGroup)?.removeView(currentPopup)
+                    currentPopup.apply {
+                        layoutParams = ViewGroup.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                        )
+                    }
+                },
+                modifier = Modifier.fillMaxSize(),
+            )
+        }
+
         // Loading overlay
         if (!isBridgeReady) {
             Box(
@@ -100,7 +119,7 @@ fun WalletBridgeSheet(
             }
         }
 
-        // Close button
+        // Close button (always on top)
         Box(
             modifier = Modifier
                 .fillMaxWidth()
