@@ -1,0 +1,575 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>NEAR Connect</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        html, body {
+            font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+            background: transparent;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+        }
+    </style>
+</head>
+<body>
+    <script type="module">
+        import { NearConnector } from "https://cdn.jsdelivr.net/npm/@hot-labs/near-connect@0.10.0/+esm";
+
+        // Borsh schema for SignedDelegate (NEP-366 meta transactions).
+        // Defined inline to avoid importing @near-js/transactions which has
+        // assertion code that fails in WebView.
+        const Ed25519Data    = { struct: { data: { array: { type: 'u8', len: 32 } } } };
+        const Secp256k1Data  = { struct: { data: { array: { type: 'u8', len: 64 } } } };
+        const PublicKeySchema = { enum: [
+            { struct: { ed25519Key: Ed25519Data } },
+            { struct: { secp256k1Key: Secp256k1Data } },
+        ]};
+        const Ed25519Sig     = { struct: { data: { array: { type: 'u8', len: 64 } } } };
+        const Secp256k1Sig   = { struct: { data: { array: { type: 'u8', len: 65 } } } };
+        const SignatureSchema = { enum: [
+            { struct: { ed25519Signature: Ed25519Sig } },
+            { struct: { secp256k1Signature: Secp256k1Sig } },
+        ]};
+        const FunctionCallPermission = { struct: {
+            allowance: { option: 'u128' },
+            receiverId: 'string',
+            methodNames: { array: { type: 'string' } },
+        }};
+        const AccessKeyPermission = { enum: [
+            { struct: { functionCall: FunctionCallPermission } },
+            { struct: { fullAccess: { struct: {} } } },
+        ]};
+        const AccessKeySchema = { struct: { nonce: 'u64', permission: AccessKeyPermission } };
+        const NonDelegateAction = { enum: [
+            { struct: { createAccount:    { struct: {} } } },                                                    // 0
+            { struct: { deployContract:   { struct: { code: { array: { type: 'u8' } } } } } },                  // 1
+            { struct: { functionCall:     { struct: { methodName: 'string', args: { array: { type: 'u8' } }, gas: 'u64', deposit: 'u128' } } } },  // 2
+            { struct: { transfer:         { struct: { deposit: 'u128' } } } },                                   // 3
+            { struct: { stake:            { struct: { stake: 'u128', publicKey: PublicKeySchema } } } },          // 4
+            { struct: { addKey:           { struct: { publicKey: PublicKeySchema, accessKey: AccessKeySchema } } } },  // 5
+            { struct: { deleteKey:        { struct: { publicKey: PublicKeySchema } } } },                         // 6
+            { struct: { deleteAccount:    { struct: { beneficiaryId: 'string' } } } },                           // 7
+        ]};
+        const DelegateActionSchema = { struct: {
+            senderId: 'string',
+            receiverId: 'string',
+            actions: { array: { type: NonDelegateAction } },
+            nonce: 'u64',
+            maxBlockHeight: 'u64',
+            publicKey: PublicKeySchema,
+        }};
+        const SignedDelegateSchema = { struct: {
+            delegateAction: DelegateActionSchema,
+            signature: SignatureSchema,
+        }};
+
+        // Lazy-load borsh only when needed (for delegate action encoding).
+        let _borshSerialize = null;
+        async function getBorshSerialize() {
+            if (!_borshSerialize) {
+                const borsh = await import("https://cdn.jsdelivr.net/npm/borsh@1.0.0/+esm");
+                _borshSerialize = borsh.serialize;
+            }
+            return _borshSerialize;
+        }
+
+        function postToNative(type, data) {
+            try {
+                if (typeof NearConnectBridge !== 'undefined') {
+                    NearConnectBridge.onEvent(JSON.stringify({ type, ...data }));
+                }
+            } catch (e) {
+                console.error("postToNative error:", e);
+            }
+        }
+
+        // BigInt-safe JSON serializer (NEAR uses BigInt for gas, deposits, block heights, etc.)
+        function safeStringify(obj) {
+            return JSON.stringify(obj, (key, value) =>
+                typeof value === "bigint" ? value.toString() : value
+            );
+        }
+
+        // Ledger executor URL. near-connect fetches this URL (with ?nonce=...
+        // appended) and injects the response text into an iframe srcdoc.
+        // On Android, this fetch is intercepted by shouldInterceptRequest()
+        // and served from local assets.
+        const _ledgerExecutorURL = "https://raw.githubusercontent.com/aspect-build/near-connect-android/refs/heads/main/near-connect/src/main/assets/ledger-executor.js";
+
+        let connector = null;
+
+        async function init(network) {
+            try {
+                connector = new NearConnector({
+                    network: network || "mainnet",
+                });
+
+                connector.on("wallet:signIn", (event) => {
+                    const account = event.accounts && event.accounts[0];
+                    if (account) {
+                        postToNative("signIn", {
+                            accountId: account.accountId,
+                            publicKey: account.publicKey || null,
+                            walletId: event.source || "unknown",
+                        });
+                    }
+                });
+
+                connector.on("wallet:signInAndSignMessage", (event) => {
+                    const account = event.accounts && event.accounts[0];
+                    if (account) {
+                        postToNative("signInAndSignMessage", {
+                            accountId: account.accountId,
+                            publicKey: account.publicKey || null,
+                            walletId: event.source || "unknown",
+                            signedMessage: account.signedMessage || null,
+                        });
+                    }
+                });
+
+                connector.on("wallet:signOut", () => {
+                    postToNative("signOut", {});
+                });
+
+                postToNative("ready", {});
+
+                // Register Ledger hardware wallet (BLE via Android bridge)
+                try {
+                    console.log("[NEARConnect] Registering Ledger wallet with executor URL:", _ledgerExecutorURL);
+                    await connector.whenManifestLoaded;
+                    await connector.registerWallet({
+                        id: "ledger",
+                        name: "Ledger",
+                        icon: "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'%3E%3Crect width='40' height='40' rx='8' fill='%23000'/%3E%3Cpath d='M24.5 6H10v17.5h17.5V10.5A4.5 4.5 0 0024.5 6zM6 6v5h4V6H6zm0 9v4h4v-4H6zm0 8v11h5.5v-4h-1.5v-3H6v-4zm22 7v4h5.5a4.5 4.5 0 004.5-4.5V30h-4v4H28zm8-8v4h4v-4h-4zm0-9v4h4v-4h-4z' fill='%23fff'/%3E%3C/svg%3E",
+                        description: "Ledger hardware wallet via Bluetooth",
+                        website: "https://www.ledger.com",
+                        version: "1.0.0",
+                        executor: _ledgerExecutorURL,
+                        type: "sandbox",
+                        platform: [],
+                        features: {
+                            signMessage: true,
+                            signTransaction: true,
+                            signInWithoutAddKey: false,
+                            signInAndSignMessage: true,
+                            signAndSendTransaction: true,
+                            signAndSendTransactions: true,
+                            signDelegateActions: true,
+                            mainnet: true,
+                            testnet: true,
+                        },
+                        permissions: {
+                            storage: true,
+                            bluetooth: true,
+                            allowsOpen: [],
+                        },
+                    });
+                    console.log("[NEARConnect] Ledger wallet registered successfully");
+                } catch (e) {
+                    console.warn("[NEARConnect] Failed to register Ledger wallet:", e);
+                }
+            } catch (err) {
+                postToNative("error", { message: "Init failed: " + err.message });
+            }
+        }
+
+        window.nearConnect = async function() {
+            if (!connector) {
+                postToNative("error", { message: "Connector not initialized" });
+                return;
+            }
+            try {
+                await connector.connect();
+            } catch (err) {
+                postToNative("error", { message: err.message });
+            }
+        };
+
+        window.nearConnectWallet = async function(walletId) {
+            if (!connector) {
+                postToNative("error", { message: "Connector not initialized" });
+                return;
+            }
+            try {
+                await connector.connect({ walletId: walletId });
+            } catch (err) {
+                postToNative("error", { message: err.message });
+            }
+        };
+
+        window.nearConnectWithSignMessage = async function(message, recipient, nonceBase64) {
+            if (!connector) {
+                postToNative("error", { message: "Connector not initialized" });
+                return;
+            }
+            try {
+                const nonceArray = Uint8Array.from(atob(nonceBase64), c => c.charCodeAt(0));
+                await connector.connect({
+                    signMessageParams: {
+                        message: message,
+                        recipient: recipient,
+                        nonce: nonceArray,
+                    }
+                });
+            } catch (err) {
+                postToNative("error", { message: err.message });
+            }
+        };
+
+        window.nearDisconnect = async function() {
+            if (!connector) return;
+            try {
+                await connector.disconnect();
+                postToNative("signOut", {});
+            } catch (err) {
+                postToNative("error", { message: err.message });
+            }
+        };
+
+        window.nearSignAndSendTransaction = async function(receiverId, actionsJson) {
+            if (!connector) {
+                postToNative("transactionError", { message: "Connector not initialized" });
+                return;
+            }
+            try {
+                const wallet = await connector.wallet();
+                if (!wallet) {
+                    postToNative("transactionError", { message: "No wallet connected" });
+                    return;
+                }
+                const actions = JSON.parse(actionsJson);
+                const result = await wallet.signAndSendTransaction({
+                    receiverId: receiverId,
+                    actions: actions,
+                });
+                const hash = result && result.transaction_outcome
+                    ? result.transaction_outcome.id
+                    : (result && result.transaction ? result.transaction.hash : null);
+                postToNative("transactionResult", {
+                    transactionHash: hash || "unknown",
+                    result: safeStringify(result),
+                });
+            } catch (err) {
+                postToNative("transactionError", { message: err.message });
+            }
+        };
+
+        window.nearSignAndSendTransactions = async function(transactionsJson) {
+            if (!connector) {
+                postToNative("transactionError", { message: "Connector not initialized" });
+                return;
+            }
+            try {
+                const wallet = await connector.wallet();
+                if (!wallet) {
+                    postToNative("transactionError", { message: "No wallet connected" });
+                    return;
+                }
+                const transactions = JSON.parse(transactionsJson);
+                const results = await wallet.signAndSendTransactions({ transactions });
+                postToNative("transactionsResult", { results: safeStringify(results) });
+            } catch (err) {
+                postToNative("transactionError", { message: err.message });
+            }
+        };
+
+        // Base58 decoder (NEAR uses base58 for public keys and signatures)
+        const BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+        function base58Decode(str) {
+            const bytes = [];
+            for (let i = 0; i < str.length; i++) {
+                const idx = BASE58_ALPHABET.indexOf(str[i]);
+                if (idx < 0) throw new Error("Invalid base58 character: " + str[i]);
+                let carry = idx;
+                for (let j = 0; j < bytes.length; j++) {
+                    carry += bytes[j] * 58;
+                    bytes[j] = carry & 0xff;
+                    carry >>= 8;
+                }
+                while (carry > 0) {
+                    bytes.push(carry & 0xff);
+                    carry >>= 8;
+                }
+            }
+            // Leading zeros
+            for (let i = 0; i < str.length && str[i] === '1'; i++) bytes.push(0);
+            return new Uint8Array(bytes.reverse());
+        }
+
+        // Convert raw bytes from various formats to Uint8Array
+        function toBytes(val) {
+            if (val instanceof Uint8Array) return val;
+            if (Array.isArray(val)) return new Uint8Array(val);
+            if (val && typeof val === "object" && val.type === "Buffer" && Array.isArray(val.data)) {
+                return new Uint8Array(val.data);
+            }
+            if (typeof val === "object" && val !== null && typeof val.length === "number") {
+                return new Uint8Array(Array.from(val));
+            }
+            return new Uint8Array(0);
+        }
+
+        function toSchemaPublicKey(pk) {
+            if (typeof pk === "string") {
+                if (pk.startsWith("ed25519:")) {
+                    return { ed25519Key: { data: base58Decode(pk.slice(8)) } };
+                }
+                if (pk.startsWith("secp256k1:")) {
+                    return { secp256k1Key: { data: base58Decode(pk.slice(10)) } };
+                }
+                return { ed25519Key: { data: base58Decode(pk) } };
+            }
+            if (pk.ed25519Key || pk.secp256k1Key) return pk;
+            const data = toBytes(pk.data);
+            const keyType = pk.keyType ?? 0;
+            if (keyType === 1) return { secp256k1Key: { data } };
+            return { ed25519Key: { data } };
+        }
+
+        function toSchemaSignature(sig) {
+            if (typeof sig === "string") {
+                if (sig.startsWith("ed25519:")) {
+                    return { ed25519Signature: { data: base58Decode(sig.slice(8)) } };
+                }
+                if (sig.startsWith("secp256k1:")) {
+                    return { secp256k1Signature: { data: base58Decode(sig.slice(10)) } };
+                }
+                return { ed25519Signature: { data: base58Decode(sig) } };
+            }
+            if (sig.ed25519Signature || sig.secp256k1Signature) return sig;
+            const data = toBytes(sig.data);
+            const keyType = sig.keyType ?? 0;
+            if (keyType === 1) return { secp256k1Signature: { data } };
+            return { ed25519Signature: { data } };
+        }
+
+        function argsToBytes(args) {
+            if (args instanceof Uint8Array) return args;
+            if (typeof args === "string") {
+                return Uint8Array.from(atob(args), c => c.charCodeAt(0));
+            }
+            return toBytes(args || []);
+        }
+
+        function toSchemaAction(action) {
+            if (action.type && action.params) {
+                switch (action.type) {
+                    case "FunctionCall": {
+                        const p = action.params;
+                        return { functionCall: {
+                            methodName: p.methodName,
+                            args: argsToBytes(p.args),
+                            gas: BigInt(p.gas),
+                            deposit: BigInt(p.deposit || 0),
+                        }};
+                    }
+                    case "Transfer":
+                        return { transfer: { deposit: BigInt(action.params.deposit) } };
+                    case "CreateAccount":
+                        return { createAccount: {} };
+                    case "DeleteAccount":
+                        return { deleteAccount: { beneficiaryId: action.params.beneficiaryId } };
+                    case "AddKey":
+                        return { addKey: action.params };
+                    case "DeleteKey":
+                        return { deleteKey: { publicKey: toSchemaPublicKey(action.params.publicKey) } };
+                    case "DeployContract":
+                        return { deployContract: { code: toBytes(action.params.code) } };
+                    case "Stake":
+                        return { stake: {
+                            stake: BigInt(action.params.stake),
+                            publicKey: toSchemaPublicKey(action.params.publicKey),
+                        }};
+                    default:
+                        throw new Error("Unknown action type: " + action.type);
+                }
+            }
+
+            if (action.functionCall) {
+                const fc = action.functionCall;
+                return { functionCall: {
+                    methodName: fc.methodName,
+                    args: argsToBytes(fc.args),
+                    gas: BigInt(fc.gas),
+                    deposit: BigInt(fc.deposit || 0),
+                }};
+            }
+            if (action.transfer) {
+                return { transfer: { deposit: BigInt(action.transfer.deposit) } };
+            }
+            if (action.stake) {
+                return { stake: {
+                    stake: BigInt(action.stake.stake),
+                    publicKey: toSchemaPublicKey(action.stake.publicKey),
+                }};
+            }
+            if (action.deleteKey) {
+                return { deleteKey: { publicKey: toSchemaPublicKey(action.deleteKey.publicKey) } };
+            }
+            if (action.deployContract) {
+                return { deployContract: { code: toBytes(action.deployContract.code) } };
+            }
+            if (action.deleteAccount) {
+                return { deleteAccount: { beneficiaryId: action.deleteAccount.beneficiaryId } };
+            }
+            return action;
+        }
+
+        function bytesToBase64(bytes) {
+            let binary = "";
+            for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+            return btoa(binary);
+        }
+
+        async function signedDelegateToBase64(signedDelegate) {
+            if (signedDelegate && typeof signedDelegate.encode === "function") {
+                return bytesToBase64(new Uint8Array(signedDelegate.encode()));
+            }
+            if (signedDelegate instanceof Uint8Array) return bytesToBase64(signedDelegate);
+            if (typeof signedDelegate === "string") return signedDelegate;
+
+            const serialize = await getBorshSerialize();
+            const da = signedDelegate.delegateAction;
+
+            console.log("[NEARConnect] signedDelegate keys:", Object.keys(signedDelegate));
+            console.log("[NEARConnect] delegateAction keys:", Object.keys(da));
+
+            const schemaActions = da.actions.map(toSchemaAction);
+            const schemaPK = toSchemaPublicKey(da.publicKey);
+            const schemaSig = toSchemaSignature(signedDelegate.signature);
+
+            const shaped = {
+                delegateAction: {
+                    senderId: da.senderId,
+                    receiverId: da.receiverId,
+                    actions: schemaActions,
+                    nonce: BigInt(da.nonce),
+                    maxBlockHeight: BigInt(da.maxBlockHeight),
+                    publicKey: schemaPK,
+                },
+                signature: schemaSig,
+            };
+
+            const bytes = serialize(SignedDelegateSchema, shaped);
+            return bytesToBase64(bytes);
+        }
+
+        window.nearSignDelegateActions = async function(delegateActionsJson) {
+            if (!connector) {
+                postToNative("delegateActionError", { message: "Connector not initialized" });
+                return;
+            }
+            try {
+                const wallet = await connector.wallet();
+                if (!wallet) {
+                    postToNative("delegateActionError", { message: "No wallet connected" });
+                    return;
+                }
+                const delegateActions = JSON.parse(delegateActionsJson);
+                const result = await wallet.signDelegateActions({ delegateActions });
+
+                const base64Array = await Promise.all(
+                    (result.signedDelegateActions || []).map(
+                        async (action, idx) => {
+                            if (typeof action.signedDelegateAction === "string") {
+                                return action.signedDelegateAction;
+                            }
+                            return signedDelegateToBase64(action.signedDelegate);
+                        }
+                    )
+                );
+
+                postToNative("delegateActionResult", {
+                    signedDelegateActions: base64Array,
+                });
+            } catch (err) {
+                console.error("[NEARConnect] nearSignDelegateActions error:", err, err && err.stack);
+                postToNative("delegateActionError", { message: err.message + (err.stack ? "\n" + err.stack : "") });
+            }
+        };
+
+        window.nearSignMessage = async function(message, recipient, nonceBase64) {
+            if (!connector) {
+                postToNative("messageError", { message: "Connector not initialized" });
+                return;
+            }
+            try {
+                const wallet = await connector.wallet();
+                if (!wallet) {
+                    postToNative("messageError", { message: "No wallet connected" });
+                    return;
+                }
+                const nonceArray = Uint8Array.from(atob(nonceBase64), c => c.charCodeAt(0));
+                const result = await wallet.signMessage({
+                    message: message,
+                    recipient: recipient,
+                    nonce: nonceArray,
+                });
+                postToNative("messageResult", {
+                    accountId: result.accountId,
+                    publicKey: result.publicKey,
+                    signedMessage: result.signedMessage,
+                });
+            } catch (err) {
+                postToNative("messageError", { message: err.message });
+            }
+        };
+
+        // ================================================================
+        // Ledger BLE Bridge Relay
+        // ================================================================
+
+        const LEDGER_BLE_REQUEST = "near-connect:ledger-ble:request";
+        const LEDGER_BLE_RESPONSE = "near-connect:ledger-ble:response";
+
+        // Listen for Ledger BLE requests from the sandbox iframe
+        window.addEventListener("message", (event) => {
+            if (!event.data || event.data.type !== LEDGER_BLE_REQUEST) return;
+            const { id, action, params } = event.data;
+            console.log("[BLE Relay] iframe->Native:", action, "id:", id, "params:", JSON.stringify(params));
+            try {
+                NearConnectBridge.onLedgerBLE(JSON.stringify({
+                    action,
+                    id,
+                    ...(params || {}),
+                }));
+            } catch (e) {
+                console.error("[BLE Relay] Native bridge unavailable:", e.message);
+                if (event.source) {
+                    event.source.postMessage({
+                        type: LEDGER_BLE_RESPONSE,
+                        id,
+                        error: "Native BLE bridge unavailable: " + e.message,
+                    }, "*");
+                }
+            }
+        });
+
+        // Native calls _ledgerBLECallback(id, result, error) — relay to iframe
+        window._ledgerBLECallback = function(id, result, error) {
+            const iframes = document.querySelectorAll("iframe");
+            const message = { type: LEDGER_BLE_RESPONSE, id, result, error };
+            iframes.forEach(iframe => {
+                try {
+                    iframe.contentWindow.postMessage(message, "*");
+                } catch (e) {
+                    console.error("[BLE Relay] postMessage to iframe failed:", e.message);
+                }
+            });
+        };
+
+        // Capture unhandled errors and forward to native for debugging
+        window.onerror = function(msg, src, line, col, err) {
+            postToNative("error", { message: "JS: " + msg + " (line " + line + ")" });
+        };
+
+        const urlParams = new URLSearchParams(window.location.search);
+        const network = urlParams.get("network") || "mainnet";
+        init(network);
+    </script>
+</body>
+</html>
