@@ -5,6 +5,7 @@ import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothGatt
 import android.bluetooth.BluetoothGattCallback
 import android.bluetooth.BluetoothGattCharacteristic
+import android.bluetooth.BluetoothGattDescriptor
 import android.bluetooth.BluetoothGattService
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
@@ -371,11 +372,11 @@ class LedgerBLEManager(private val context: Context) {
                             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                                 gatt.writeDescriptor(
                                     descriptor,
-                                    BluetoothGattCharacteristic.ENABLE_NOTIFICATION_VALUE,
+                                    BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE,
                                 )
                             } else {
                                 @Suppress("DEPRECATION")
-                                descriptor.value = BluetoothGattCharacteristic.ENABLE_NOTIFICATION_VALUE
+                                descriptor.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
                                 @Suppress("DEPRECATION")
                                 gatt.writeDescriptor(descriptor)
                             }

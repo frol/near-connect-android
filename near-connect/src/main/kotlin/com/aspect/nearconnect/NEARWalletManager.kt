@@ -70,6 +70,12 @@ class NEARWalletManager(private val context: Context) {
     val isSignedIn: Boolean get() = _currentAccount.value != null
 
     /**
+     * Optional interceptor for WebView resource requests.
+     * Used by tests to serve custom executor scripts from test assets.
+     */
+    var requestInterceptor: ((WebResourceRequest) -> WebResourceResponse?)? = null
+
+    /**
      * When true, the wallet selector should be auto-triggered on sheet appear.
      */
     var pendingConnect = false
@@ -97,10 +103,26 @@ class NEARWalletManager(private val context: Context) {
         settings.allowFileAccess = false
         settings.allowContentAccess = false
         settings.mediaPlaybackRequiresUserGesture = false
+        settings.useWideViewPort = true
+        settings.loadWithOverviewMode = true
+
+        // Use a standard Chrome Mobile user agent so wallet websites don't
+        // detect us as a WebView and block rendering.
+        settings.userAgentString =
+            "Mozilla/5.0 (Linux; Android ${android.os.Build.VERSION.RELEASE}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
+
+        // Allow mixed content – some wallet executors load sub-resources over HTTP
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.LOLLIPOP) {
+            settings.mixedContentMode = android.webkit.WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+        }
 
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
             settings.safeBrowsingEnabled = false
         }
+
+        // Enable third-party cookies (required by wallet executors that set cookies
+        // inside sandboxed iframes, e.g. for session tracking or Cloudflare challenges)
+        android.webkit.CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
 
         addJavascriptInterface(JSBridge(), "NearConnectBridge")
         webViewClient = BridgeWebViewClient()
@@ -110,6 +132,11 @@ class NEARWalletManager(private val context: Context) {
 
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.KITKAT) {
             WebView.setWebContentsDebuggingEnabled(true)
+        }
+
+        // Request high renderer priority so the OS is less likely to kill the sandbox process
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+            setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, false)
         }
     }
 
@@ -732,14 +759,87 @@ class NEARWalletManager(private val context: Context) {
         }
     }
 
+    // MARK: - CORS Proxy
+
+    /**
+     * Fetch an HTTPS URL from Kotlin and return the response with
+     * Access-Control-Allow-Origin headers, bypassing WebView CORS restrictions.
+     *
+     * Called from [BridgeWebViewClient.shouldInterceptRequest] on the WebView's
+     * internal IO thread (blocking is expected).
+     */
+    private fun proxyCrossOriginGet(
+        url: String,
+        requestHeaders: Map<String, String>?,
+    ): WebResourceResponse? {
+        return try {
+            val conn = URL(url).openConnection() as HttpURLConnection
+            conn.requestMethod = "GET"
+            conn.connectTimeout = 15_000
+            conn.readTimeout = 30_000
+            conn.instanceFollowRedirects = true
+
+            // Forward Accept and other headers, but NOT Origin / Referer
+            // (those are what cause CORS failures on the server side).
+            requestHeaders?.forEach { (key, value) ->
+                val lower = key.lowercase()
+                if (lower != "origin" && lower != "referer") {
+                    conn.setRequestProperty(key, value)
+                }
+            }
+
+            val responseCode = conn.responseCode
+            val inputStream =
+                if (responseCode in 200..299) conn.inputStream else conn.errorStream
+
+            // Parse Content-Type: "text/javascript; charset=utf-8" → mimeType + encoding
+            val rawContentType = conn.contentType ?: "application/octet-stream"
+            val parts = rawContentType.split(";").map { it.trim() }
+            val mimeType = parts.firstOrNull() ?: "application/octet-stream"
+            val encoding = parts.find { it.startsWith("charset=", ignoreCase = true) }
+                ?.substringAfter("=")?.trim() ?: "UTF-8"
+
+            val headers = mutableMapOf(
+                "Access-Control-Allow-Origin" to "*",
+                "Access-Control-Allow-Methods" to "GET, OPTIONS",
+                "Access-Control-Allow-Headers" to "*",
+            )
+            // Preserve caching headers from the real response
+            for (headerName in listOf("Cache-Control", "ETag", "Last-Modified", "Expires")) {
+                conn.getHeaderField(headerName)?.let { headers[headerName] = it }
+            }
+
+            WebResourceResponse(
+                mimeType,
+                encoding,
+                responseCode,
+                conn.responseMessage ?: "OK",
+                headers,
+                inputStream,
+            )
+        } catch (e: Exception) {
+            Log.w(TAG, "CORS proxy failed for $url: ${e.message}")
+            null // Fall back to WebView's default handling
+        }
+    }
+
     // MARK: - WebView Clients
 
     private inner class BridgeWebViewClient : WebViewClient() {
-        /** Intercept the ledger-executor.js fetch to serve local asset copy. */
+        /**
+         * Intercept resource requests from the bridge WebView.
+         *
+         * 1. Serve ledger-executor.js from local assets.
+         * 2. Proxy cross-origin HTTPS requests to bypass CORS restrictions.
+         *    The bridge page has a synthetic origin (near-connect-bridge.local)
+         *    which most servers won't accept, so we fetch from Kotlin and
+         *    inject Access-Control-Allow-Origin headers.
+         */
         override fun shouldInterceptRequest(
             view: WebView,
             request: WebResourceRequest,
         ): WebResourceResponse? {
+            requestInterceptor?.invoke(request)?.let { return it }
             val url = request.url.toString()
             if (url.contains("ledger-executor.js")) {
                 return try {
@@ -753,7 +853,32 @@ class NEARWalletManager(private val context: Context) {
                     null
                 }
             }
+
+            // Proxy cross-origin HTTPS requests to bypass CORS.
+            // The bridge page origin is https://near-connect-bridge.local which
+            // is synthetic (from loadDataWithBaseURL) and not recognized by any
+            // real server's CORS policy.
+            val uri = request.url
+            val host = uri.host?.lowercase() ?: ""
+            if (uri.scheme?.lowercase() == "https" &&
+                host != "near-connect-bridge.local" &&
+                request.method?.uppercase() == "GET"
+            ) {
+                return proxyCrossOriginGet(url, request.requestHeaders)
+            }
+
             return null
+        }
+
+        override fun onRenderProcessGone(
+            view: WebView,
+            detail: android.webkit.RenderProcessGoneDetail?,
+        ): Boolean {
+            Log.w(TAG, "WebView render process gone, didCrash=${detail?.didCrash()}")
+            // Reset bridge ready state and reload to recover
+            _isBridgeReady.value = false
+            Handler(Looper.getMainLooper()).postDelayed({ loadBridgePage() }, 2000)
+            return true // Prevent app crash
         }
     }
 
@@ -789,8 +914,15 @@ class NEARWalletManager(private val context: Context) {
                 settings.javaScriptEnabled = true
                 settings.domStorageEnabled = true
                 settings.setSupportMultipleWindows(true)
+                settings.javaScriptCanOpenWindowsAutomatically = true
                 settings.userAgentString =
-                    "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
+                    "Mozilla/5.0 (Linux; Android ${android.os.Build.VERSION.RELEASE}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
+                settings.useWideViewPort = true
+                settings.loadWithOverviewMode = true
+
+                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.LOLLIPOP) {
+                    settings.mixedContentMode = android.webkit.WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+                }
 
                 if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
                     settings.safeBrowsingEnabled = false
@@ -801,15 +933,22 @@ class NEARWalletManager(private val context: Context) {
 
                 webViewClient = PopupWebViewClient()
                 webChromeClient = PopupWebChromeClient()
+
+                setBackgroundColor(android.graphics.Color.WHITE)
             }
 
-            (view.parent as? ViewGroup)?.addView(
+            val parent = view.parent as? ViewGroup
+            parent?.addView(
                 popup,
                 ViewGroup.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.MATCH_PARENT,
                 ),
             )
+            // Ensure popup renders on top and gets focus
+            popup.bringToFront()
+            popup.requestFocus()
+            parent?.requestLayout()
             popupWebViews.add(popup)
 
             val transport = resultMsg.obj as WebView.WebViewTransport
