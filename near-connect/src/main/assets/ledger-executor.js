@@ -1158,7 +1158,7 @@ class LedgerWallet {
         const accounts = await this._ensureReady();
         const network = params.network || "mainnet";
         const signerId = accounts[0].accountId;
-        const { receiverId, actions } = params.transactions[0];
+        const { receiverId, actions } = params;
 
         const { accessKey, block } = await this._getAccessKeyAndBlock(network, signerId, accounts[0].publicKey);
         const blockHash = base58Decode(block.header.hash);
@@ -1232,8 +1232,10 @@ class LedgerWallet {
         const results = [];
         for (const tx of params.transactions) {
             const result = await this.signAndSendTransaction({
-                ...params,
-                transactions: [tx],
+                network: params.network,
+                signerId: params.signerId,
+                receiverId: tx.receiverId,
+                actions: tx.actions,
             });
             results.push(result);
         }
