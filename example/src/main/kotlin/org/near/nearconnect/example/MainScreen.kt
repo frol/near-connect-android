@@ -1,4 +1,4 @@
-package com.aspect.nearconnect.example
+package org.near.nearconnect.example
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -51,8 +51,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
-import com.aspect.nearconnect.NEARWalletManager
-import com.aspect.nearconnect.WalletBridgeSheet
+import org.near.nearconnect.NEARWalletManager
+import org.near.nearconnect.WalletBridgeSheet
 
 data class LogEntry(
     val action: String,

@@ -1,4 +1,4 @@
-package com.aspect.nearconnect
+package org.near.nearconnect
 
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse

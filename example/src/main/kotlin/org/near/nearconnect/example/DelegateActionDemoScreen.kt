@@ -1,4 +1,4 @@
-package com.aspect.nearconnect.example
+package org.near.nearconnect.example
 
 import android.util.Base64
 import androidx.compose.foundation.layout.Column
@@ -29,7 +29,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
-import com.aspect.nearconnect.NEARWalletManager
+import org.near.nearconnect.NEARWalletManager
 import kotlinx.coroutines.launch
 import org.json.JSONObject
 

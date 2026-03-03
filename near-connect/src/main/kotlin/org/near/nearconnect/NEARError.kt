@@ -1,4 +1,4 @@
-package com.aspect.nearconnect
+package org.near.nearconnect
 
 /**
  * Errors thrown by [NEARWalletManager] operations.

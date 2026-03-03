@@ -1,4 +1,4 @@
 # Keep JavaScript interface methods
--keepclassmembers class com.aspect.nearconnect.NEARWalletManager$JSBridge {
+-keepclassmembers class org.near.nearconnect.NEARWalletManager$JSBridge {
     @android.webkit.JavascriptInterface <methods>;
 }

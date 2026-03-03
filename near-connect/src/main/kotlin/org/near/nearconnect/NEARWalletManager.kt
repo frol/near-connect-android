@@ -1,4 +1,4 @@
-package com.aspect.nearconnect
+package org.near.nearconnect
 
 import android.annotation.SuppressLint
 import android.content.Context
@@ -161,6 +161,21 @@ class NEARWalletManager(private val context: Context) {
     // MARK: - Ledger BLE
 
     val ledgerBLE = LedgerBLEManager(context)
+
+    /**
+     * Callback invoked when the Ledger plugin needs Bluetooth permissions that
+     * have not yet been granted.  The host Activity should launch a permission
+     * request and call [onResult] with `true` if all permissions were granted.
+     *
+     * Example (in your Activity):
+     * ```
+     * walletManager.blePermissionRequester = { permissions, onResult ->
+     *     pendingCallback = onResult
+     *     permissionLauncher.launch(permissions.toTypedArray())
+     * }
+     * ```
+     */
+    var blePermissionRequester: ((permissions: List<String>, onResult: (granted: Boolean) -> Unit) -> Unit)? = null
 
     // MARK: - Persistence
 
@@ -1037,13 +1052,24 @@ class NEARWalletManager(private val context: Context) {
 
         // Guard: BLE operations need runtime permissions on Android 6+
         if (action in listOf("scan", "connect", "exchange") && !hasBLEPermissions(context)) {
-            val missing = requiredBLEPermissions().filter { perm ->
-                androidx.core.content.ContextCompat.checkSelfPermission(
-                    context, perm,
-                ) != android.content.pm.PackageManager.PERMISSION_GRANTED
+            val requester = blePermissionRequester
+            if (requester != null) {
+                requester(requiredBLEPermissions()) { granted ->
+                    if (granted) {
+                        handleLedgerBLEAction(action, body, requestId)
+                    } else {
+                        respondToJS(requestId, error = "Bluetooth permissions denied by user")
+                    }
+                }
+            } else {
+                val missing = requiredBLEPermissions().filter { perm ->
+                    androidx.core.content.ContextCompat.checkSelfPermission(
+                        context, perm,
+                    ) != android.content.pm.PackageManager.PERMISSION_GRANTED
+                }
+                Log.e(TAG, "Missing BLE permissions: $missing")
+                respondToJS(requestId, error = "Bluetooth permissions not granted. Required: ${missing.joinToString()}")
             }
-            Log.e(TAG, "Missing BLE permissions: $missing")
-            respondToJS(requestId, error = "Bluetooth permissions not granted. Required: ${missing.joinToString()}")
             return
         }
 

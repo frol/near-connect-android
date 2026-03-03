@@ -5,7 +5,7 @@ plugins {
 }
 
 android {
-    namespace = "com.aspect.nearconnect"
+    namespace = "org.near.nearconnect"
     compileSdk = 34
 
     defaultConfig {

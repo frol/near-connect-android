@@ -1,4 +1,4 @@
-package com.aspect.nearconnect
+package org.near.nearconnect
 
 import android.view.ViewGroup
 import android.webkit.WebView

@@ -5,11 +5,11 @@ plugins {
 }
 
 android {
-    namespace = "com.aspect.nearconnect.example"
+    namespace = "org.near.nearconnect.example"
     compileSdk = 34
 
     defaultConfig {
-        applicationId = "com.aspect.nearconnect.example"
+        applicationId = "org.near.nearconnect.example"
         minSdk = 24
         targetSdk = 34
         versionCode = 1
