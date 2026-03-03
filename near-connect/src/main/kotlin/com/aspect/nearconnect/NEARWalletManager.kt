@@ -947,8 +947,6 @@ class NEARWalletManager(private val context: Context) {
                 settings.javaScriptCanOpenWindowsAutomatically = true
                 settings.userAgentString =
                     "Mozilla/5.0 (Linux; Android ${android.os.Build.VERSION.RELEASE}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
-                settings.useWideViewPort = true
-                settings.loadWithOverviewMode = true
 
                 if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.LOLLIPOP) {
                     settings.mixedContentMode = android.webkit.WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
