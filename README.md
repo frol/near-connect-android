@@ -31,6 +31,9 @@ dependencies {
 Create a single `NEARWalletManager` instance in your Activity. It owns a persistent WebView that must live for the app's lifetime:
 
 ```kotlin
+import org.near.nearconnect.NEARWalletManager
+import org.near.nearconnect.WalletBridgeSheet
+
 class MainActivity : ComponentActivity() {
     private lateinit var walletManager: NEARWalletManager
 
@@ -126,6 +129,7 @@ val walletManager = NEARWalletManager(context: Context)
 | `isSignedIn` | `Boolean` | Convenience check for `currentAccount != null` |
 | `bridgeWebView` | `WebView` | The underlying bridge WebView |
 | `ledgerBLE` | `LedgerBLEManager` | Ledger Bluetooth LE manager |
+| `blePermissionRequester` | `((List<String>, (Boolean) -> Unit) -> Unit)?` | Callback to request BLE permissions on demand |
 
 #### Connection
 
@@ -293,19 +297,54 @@ The library declares these permissions in its manifest (merged automatically):
 
 ```xml
 <uses-permission android:name="android.permission.INTERNET" />
-<!-- Bluetooth permissions are for Ledger hardware wallet support -->
-<uses-permission android:name="android.permission.BLUETOOTH" />
-<uses-permission android:name="android.permission.BLUETOOTH_SCAN" />
+
+<!-- Legacy Bluetooth & location — only on Android 11 and below (API ≤ 30) -->
+<uses-permission android:name="android.permission.BLUETOOTH"
+    android:maxSdkVersion="30" />
+<uses-permission android:name="android.permission.BLUETOOTH_ADMIN"
+    android:maxSdkVersion="30" />
+<uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"
+    android:maxSdkVersion="30" />
+
+<!-- Android 12+ (API 31+) — no location required -->
+<uses-permission android:name="android.permission.BLUETOOTH_SCAN"
+    android:usesPermissionFlags="neverForLocation" />
 <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+```
+
+On Android 12+, only `BLUETOOTH_SCAN` and `BLUETOOTH_CONNECT` are needed — no location permission. On older devices, `ACCESS_FINE_LOCATION` is required for BLE scanning but scoped with `maxSdkVersion="30"` so it doesn't appear on modern devices.
+
+Bluetooth permissions are requested **on demand** when the user selects a Ledger wallet — not at app startup. Wire up the `blePermissionRequester` callback so the library can trigger the system permission dialog:
+
+```kotlin
+private var pendingBLEPermissionCallback: ((Boolean) -> Unit)? = null
+
+private val blePermissionLauncher = registerForActivityResult(
+    ActivityResultContracts.RequestMultiplePermissions(),
+) { results ->
+    val allGranted = results.values.all { it }
+    pendingBLEPermissionCallback?.invoke(allGranted)
+    pendingBLEPermissionCallback = null
+}
+
+// In onCreate:
+walletManager.blePermissionRequester = { permissions, onResult ->
+    pendingBLEPermissionCallback = onResult
+    blePermissionLauncher.launch(permissions.toTypedArray())
+}
 ```
 
 If your app doesn't use Ledger hardware wallets, you can remove the Bluetooth permissions in your app manifest:
 
 ```xml
 <uses-permission android:name="android.permission.BLUETOOTH" tools:node="remove" />
+<uses-permission android:name="android.permission.BLUETOOTH_ADMIN" tools:node="remove" />
 <uses-permission android:name="android.permission.BLUETOOTH_SCAN" tools:node="remove" />
 <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" tools:node="remove" />
+<uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" tools:node="remove" />
 ```
+
+With these removed, your app will have zero Bluetooth or location permissions.
 
 ## Example App
 
@@ -335,7 +374,7 @@ near-connect-android/
       assets/
         near-connect-bridge.html   # JavaScript bridge page
         ledger-executor.js         # Ledger wallet executor
-      kotlin/com/aspect/nearconnect/
+      kotlin/org/near/nearconnect/
         NEARWalletManager.kt       # Main API
         NEARAccount.kt             # Account data class
         NEARError.kt               # Error types
