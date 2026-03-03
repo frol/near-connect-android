@@ -295,20 +295,16 @@ The library declares these permissions in its manifest (merged automatically):
 <uses-permission android:name="android.permission.INTERNET" />
 <!-- Bluetooth permissions are for Ledger hardware wallet support -->
 <uses-permission android:name="android.permission.BLUETOOTH" />
-<uses-permission android:name="android.permission.BLUETOOTH_ADMIN" />
 <uses-permission android:name="android.permission.BLUETOOTH_SCAN" />
 <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
-<uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
 ```
 
 If your app doesn't use Ledger hardware wallets, you can remove the Bluetooth permissions in your app manifest:
 
 ```xml
 <uses-permission android:name="android.permission.BLUETOOTH" tools:node="remove" />
-<uses-permission android:name="android.permission.BLUETOOTH_ADMIN" tools:node="remove" />
 <uses-permission android:name="android.permission.BLUETOOTH_SCAN" tools:node="remove" />
 <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" tools:node="remove" />
-<uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" tools:node="remove" />
 ```
 
 ## Example App
