@@ -100,7 +100,10 @@ fun MainScreen(walletManager: NEARWalletManager) {
     if (showWalletUI) {
         Dialog(
             onDismissRequest = { walletManager.showWalletUI.let {} },
-            properties = DialogProperties(usePlatformDefaultWidth = false),
+            properties = DialogProperties(
+                usePlatformDefaultWidth = false,
+                decorFitsSystemWindows = false,
+            ),
         ) {
             WalletBridgeSheet(
                 walletManager = walletManager,

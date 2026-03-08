@@ -38,6 +38,17 @@ import kotlinx.coroutines.delay
  *
  * Present this composable when [NEARWalletManager.showWalletUI] is true.
  * It handles wallet connection, transaction approval, and message signing flows.
+ *
+ * When hosting inside a Compose `Dialog`, use `decorFitsSystemWindows = false`
+ * in `DialogProperties` so the keyboard doesn't cover the WebView:
+ * ```
+ * Dialog(
+ *     properties = DialogProperties(
+ *         usePlatformDefaultWidth = false,
+ *         decorFitsSystemWindows = false,
+ *     ),
+ * ) { WalletBridgeSheet(...) }
+ * ```
  */
 @Composable
 fun WalletBridgeSheet(
