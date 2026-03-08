@@ -30,65 +30,7 @@
         }
     </script>
     <script type="module">
-        import { NearConnector } from "https://cdn.jsdelivr.net/npm/@hot-labs/near-connect@0.10.0/+esm";
-
-        // Borsh schema for SignedDelegate (NEP-366 meta transactions).
-        // Defined inline to avoid importing @near-js/transactions which has
-        // assertion code that fails in WebView.
-        const Ed25519Data    = { struct: { data: { array: { type: 'u8', len: 32 } } } };
-        const Secp256k1Data  = { struct: { data: { array: { type: 'u8', len: 64 } } } };
-        const PublicKeySchema = { enum: [
-            { struct: { ed25519Key: Ed25519Data } },
-            { struct: { secp256k1Key: Secp256k1Data } },
-        ]};
-        const Ed25519Sig     = { struct: { data: { array: { type: 'u8', len: 64 } } } };
-        const Secp256k1Sig   = { struct: { data: { array: { type: 'u8', len: 65 } } } };
-        const SignatureSchema = { enum: [
-            { struct: { ed25519Signature: Ed25519Sig } },
-            { struct: { secp256k1Signature: Secp256k1Sig } },
-        ]};
-        const FunctionCallPermission = { struct: {
-            allowance: { option: 'u128' },
-            receiverId: 'string',
-            methodNames: { array: { type: 'string' } },
-        }};
-        const AccessKeyPermission = { enum: [
-            { struct: { functionCall: FunctionCallPermission } },
-            { struct: { fullAccess: { struct: {} } } },
-        ]};
-        const AccessKeySchema = { struct: { nonce: 'u64', permission: AccessKeyPermission } };
-        const NonDelegateAction = { enum: [
-            { struct: { createAccount:    { struct: {} } } },                                                    // 0
-            { struct: { deployContract:   { struct: { code: { array: { type: 'u8' } } } } } },                  // 1
-            { struct: { functionCall:     { struct: { methodName: 'string', args: { array: { type: 'u8' } }, gas: 'u64', deposit: 'u128' } } } },  // 2
-            { struct: { transfer:         { struct: { deposit: 'u128' } } } },                                   // 3
-            { struct: { stake:            { struct: { stake: 'u128', publicKey: PublicKeySchema } } } },          // 4
-            { struct: { addKey:           { struct: { publicKey: PublicKeySchema, accessKey: AccessKeySchema } } } },  // 5
-            { struct: { deleteKey:        { struct: { publicKey: PublicKeySchema } } } },                         // 6
-            { struct: { deleteAccount:    { struct: { beneficiaryId: 'string' } } } },                           // 7
-        ]};
-        const DelegateActionSchema = { struct: {
-            senderId: 'string',
-            receiverId: 'string',
-            actions: { array: { type: NonDelegateAction } },
-            nonce: 'u64',
-            maxBlockHeight: 'u64',
-            publicKey: PublicKeySchema,
-        }};
-        const SignedDelegateSchema = { struct: {
-            delegateAction: DelegateActionSchema,
-            signature: SignatureSchema,
-        }};
-
-        // Lazy-load borsh only when needed (for delegate action encoding).
-        let _borshSerialize = null;
-        async function getBorshSerialize() {
-            if (!_borshSerialize) {
-                const borsh = await import("https://cdn.jsdelivr.net/npm/borsh@1.0.0/+esm");
-                _borshSerialize = borsh.serialize;
-            }
-            return _borshSerialize;
-        }
+        import { NearConnector } from "https://cdn.jsdelivr.net/npm/@hot-labs/near-connect@0.11.0/+esm";
 
         function postToNative(type, data) {
             try {
@@ -111,7 +53,7 @@
         // appended) and injects the response text into an iframe srcdoc.
         // On Android, this fetch is intercepted by shouldInterceptRequest()
         // and served from local assets.
-        const _ledgerExecutorURL = "https://raw.githubusercontent.com/frol/near-connect-android/refs/heads/main/near-connect/src/main/assets/ledger-executor.js";
+        const _ledgerExecutorURL = "https://raw.githubusercontent.com/near/near-connect-ledger/refs/heads/main/ledger-executor.js";
 
         let connector = null;
 
@@ -293,187 +235,6 @@
             }
         };
 
-        // Base58 decoder (NEAR uses base58 for public keys and signatures)
-        const BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
-        function base58Decode(str) {
-            const bytes = [];
-            for (let i = 0; i < str.length; i++) {
-                const idx = BASE58_ALPHABET.indexOf(str[i]);
-                if (idx < 0) throw new Error("Invalid base58 character: " + str[i]);
-                let carry = idx;
-                for (let j = 0; j < bytes.length; j++) {
-                    carry += bytes[j] * 58;
-                    bytes[j] = carry & 0xff;
-                    carry >>= 8;
-                }
-                while (carry > 0) {
-                    bytes.push(carry & 0xff);
-                    carry >>= 8;
-                }
-            }
-            // Leading zeros
-            for (let i = 0; i < str.length && str[i] === '1'; i++) bytes.push(0);
-            return new Uint8Array(bytes.reverse());
-        }
-
-        // Convert raw bytes from various formats to Uint8Array
-        function toBytes(val) {
-            if (val instanceof Uint8Array) return val;
-            if (Array.isArray(val)) return new Uint8Array(val);
-            if (val && typeof val === "object" && val.type === "Buffer" && Array.isArray(val.data)) {
-                return new Uint8Array(val.data);
-            }
-            if (typeof val === "object" && val !== null && typeof val.length === "number") {
-                return new Uint8Array(Array.from(val));
-            }
-            return new Uint8Array(0);
-        }
-
-        function toSchemaPublicKey(pk) {
-            if (typeof pk === "string") {
-                if (pk.startsWith("ed25519:")) {
-                    return { ed25519Key: { data: base58Decode(pk.slice(8)) } };
-                }
-                if (pk.startsWith("secp256k1:")) {
-                    return { secp256k1Key: { data: base58Decode(pk.slice(10)) } };
-                }
-                return { ed25519Key: { data: base58Decode(pk) } };
-            }
-            if (pk.ed25519Key || pk.secp256k1Key) return pk;
-            const data = toBytes(pk.data);
-            const keyType = pk.keyType ?? 0;
-            if (keyType === 1) return { secp256k1Key: { data } };
-            return { ed25519Key: { data } };
-        }
-
-        function toSchemaSignature(sig) {
-            if (typeof sig === "string") {
-                if (sig.startsWith("ed25519:")) {
-                    return { ed25519Signature: { data: base58Decode(sig.slice(8)) } };
-                }
-                if (sig.startsWith("secp256k1:")) {
-                    return { secp256k1Signature: { data: base58Decode(sig.slice(10)) } };
-                }
-                return { ed25519Signature: { data: base58Decode(sig) } };
-            }
-            if (sig.ed25519Signature || sig.secp256k1Signature) return sig;
-            const data = toBytes(sig.data);
-            const keyType = sig.keyType ?? 0;
-            if (keyType === 1) return { secp256k1Signature: { data } };
-            return { ed25519Signature: { data } };
-        }
-
-        function argsToBytes(args) {
-            if (args instanceof Uint8Array) return args;
-            if (typeof args === "string") {
-                return Uint8Array.from(atob(args), c => c.charCodeAt(0));
-            }
-            return toBytes(args || []);
-        }
-
-        function toSchemaAction(action) {
-            if (action.type && action.params) {
-                switch (action.type) {
-                    case "FunctionCall": {
-                        const p = action.params;
-                        return { functionCall: {
-                            methodName: p.methodName,
-                            args: argsToBytes(p.args),
-                            gas: BigInt(p.gas),
-                            deposit: BigInt(p.deposit || 0),
-                        }};
-                    }
-                    case "Transfer":
-                        return { transfer: { deposit: BigInt(action.params.deposit) } };
-                    case "CreateAccount":
-                        return { createAccount: {} };
-                    case "DeleteAccount":
-                        return { deleteAccount: { beneficiaryId: action.params.beneficiaryId } };
-                    case "AddKey":
-                        return { addKey: action.params };
-                    case "DeleteKey":
-                        return { deleteKey: { publicKey: toSchemaPublicKey(action.params.publicKey) } };
-                    case "DeployContract":
-                        return { deployContract: { code: toBytes(action.params.code) } };
-                    case "Stake":
-                        return { stake: {
-                            stake: BigInt(action.params.stake),
-                            publicKey: toSchemaPublicKey(action.params.publicKey),
-                        }};
-                    default:
-                        throw new Error("Unknown action type: " + action.type);
-                }
-            }
-
-            if (action.functionCall) {
-                const fc = action.functionCall;
-                return { functionCall: {
-                    methodName: fc.methodName,
-                    args: argsToBytes(fc.args),
-                    gas: BigInt(fc.gas),
-                    deposit: BigInt(fc.deposit || 0),
-                }};
-            }
-            if (action.transfer) {
-                return { transfer: { deposit: BigInt(action.transfer.deposit) } };
-            }
-            if (action.stake) {
-                return { stake: {
-                    stake: BigInt(action.stake.stake),
-                    publicKey: toSchemaPublicKey(action.stake.publicKey),
-                }};
-            }
-            if (action.deleteKey) {
-                return { deleteKey: { publicKey: toSchemaPublicKey(action.deleteKey.publicKey) } };
-            }
-            if (action.deployContract) {
-                return { deployContract: { code: toBytes(action.deployContract.code) } };
-            }
-            if (action.deleteAccount) {
-                return { deleteAccount: { beneficiaryId: action.deleteAccount.beneficiaryId } };
-            }
-            return action;
-        }
-
-        function bytesToBase64(bytes) {
-            let binary = "";
-            for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
-            return btoa(binary);
-        }
-
-        async function signedDelegateToBase64(signedDelegate) {
-            if (signedDelegate && typeof signedDelegate.encode === "function") {
-                return bytesToBase64(new Uint8Array(signedDelegate.encode()));
-            }
-            if (signedDelegate instanceof Uint8Array) return bytesToBase64(signedDelegate);
-            if (typeof signedDelegate === "string") return signedDelegate;
-
-            const serialize = await getBorshSerialize();
-            const da = signedDelegate.delegateAction;
-
-            console.log("[NEARConnect] signedDelegate keys:", Object.keys(signedDelegate));
-            console.log("[NEARConnect] delegateAction keys:", Object.keys(da));
-
-            const schemaActions = da.actions.map(toSchemaAction);
-            const schemaPK = toSchemaPublicKey(da.publicKey);
-            const schemaSig = toSchemaSignature(signedDelegate.signature);
-
-            const shaped = {
-                delegateAction: {
-                    senderId: da.senderId,
-                    receiverId: da.receiverId,
-                    actions: schemaActions,
-                    nonce: BigInt(da.nonce),
-                    maxBlockHeight: BigInt(da.maxBlockHeight),
-                    publicKey: schemaPK,
-                },
-                signature: schemaSig,
-            };
-
-            const bytes = serialize(SignedDelegateSchema, shaped);
-            return bytesToBase64(bytes);
-        }
-
         window.nearSignDelegateActions = async function(delegateActionsJson) {
             if (!connector) {
                 postToNative("delegateActionError", { message: "Connector not initialized" });
@@ -488,19 +249,9 @@
                 const delegateActions = JSON.parse(delegateActionsJson);
                 const result = await wallet.signDelegateActions({ delegateActions });
 
-                const base64Array = await Promise.all(
-                    (result.signedDelegateActions || []).map(
-                        async (action, idx) => {
-                            if (typeof action.signedDelegateAction === "string") {
-                                return action.signedDelegateAction;
-                            }
-                            return signedDelegateToBase64(action.signedDelegate);
-                        }
-                    )
-                );
-
+                // near-connect 0.11.0+ returns base64-encoded borsh-serialized SignedDelegate strings directly
                 postToNative("delegateActionResult", {
-                    signedDelegateActions: base64Array,
+                    signedDelegateActions: result.signedDelegateActions || [],
                 });
             } catch (err) {
                 console.error("[NEARConnect] nearSignDelegateActions error:", err, err && err.stack);
