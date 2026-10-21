@@ -122,6 +122,9 @@ val walletManager = NEARWalletManager(context: Context)
 | `showWalletUI` | `StateFlow<Boolean>` | Whether wallet UI should be shown |
 | `network` | `StateFlow<Network>` | Current network (MAINNET or TESTNET) |
 
+Collect `walletManager.lastError` to observe the latest error message. A UI can forward non-null
+values into its own `Channel` when it needs to queue notifications while temporarily stopped.
+
 #### Properties
 
 | Property | Type | Description |
@@ -271,6 +274,8 @@ All errors thrown by wallet operations extend `NEARError`:
 | `NEARError.OperationInProgress` | Another operation is already running |
 | `NEARError.WebViewNotReady` | Bridge hasn't finished loading |
 | `NEARError.WalletError(msg)` | Wallet returned an error |
+| `NEARError.NoActivityHandler` | No installed app can open an external wallet link |
+| `NEARError.ExternalLinkLaunchFailed` | Android blocked launching the external wallet link |
 | `NEARError.RPCError(msg)` | NEAR RPC call failed |
 
 ### WalletBridgeSheet

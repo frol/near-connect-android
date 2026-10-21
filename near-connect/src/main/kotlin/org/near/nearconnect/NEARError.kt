@@ -9,6 +9,8 @@ sealed class NEARError(override val message: String) : Exception(message) {
     class InvalidURL : NEARError("Failed to build wallet URL")
     class InvalidTransaction : NEARError("Failed to encode transaction")
     class NoTransactionHash : NEARError("Wallet did not return a transaction hash")
+    class NoActivityHandler : NEARError("No installed app can handle the wallet link")
+    class ExternalLinkLaunchFailed : NEARError("Unable to open external wallet link")
     class WalletError(msg: String) : NEARError(msg)
     class WebViewNotReady : NEARError("Wallet bridge is not ready yet")
     class RPCError(msg: String) : NEARError("RPC error: $msg")
