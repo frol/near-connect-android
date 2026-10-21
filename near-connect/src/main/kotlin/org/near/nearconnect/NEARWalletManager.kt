@@ -1057,7 +1057,7 @@ class NEARWalletManager(private val context: Context) {
             }
         } catch (e: java.net.URISyntaxException) {
             Log.w(TAG, "Ignoring malformed external wallet link", e)
-            reportExternalLinkError(NEARError.InvalidURL())
+            reportError(NEARError.InvalidURL())
             return false
         }
 
@@ -1076,25 +1076,25 @@ class NEARWalletManager(private val context: Context) {
                     true
                 } catch (fallbackError: ActivityNotFoundException) {
                     Log.w(TAG, "No app can open the external URL or its fallback", fallbackError)
-                    reportExternalLinkError()
+                    reportError(NEARError.NoActivityHandler())
                     false
                 } catch (fallbackError: SecurityException) {
                     Log.w(TAG, "Opening the external URL fallback was blocked", fallbackError)
-                    reportExternalLinkError(NEARError.ExternalLinkLaunchFailed())
+                    reportError(NEARError.ExternalLinkLaunchFailed())
                     false
                 }
             }
             Log.i(TAG, "No app can open the external URL or its fallback")
-            reportExternalLinkError()
+            reportError(NEARError.NoActivityHandler())
             return false
         } catch (e: SecurityException) {
             Log.w(TAG, "Opening external URL was blocked", e)
-            reportExternalLinkError(NEARError.ExternalLinkLaunchFailed())
+            reportError(NEARError.ExternalLinkLaunchFailed())
             return false
         }
     }
 
-    private fun reportExternalLinkError(error: NEARError = NEARError.NoActivityHandler()) {
+    private fun reportError(error: NEARError) {
         _lastError.value = error.message
 
         val pendingSignIn = signInContinuation.also { signInContinuation = null }
