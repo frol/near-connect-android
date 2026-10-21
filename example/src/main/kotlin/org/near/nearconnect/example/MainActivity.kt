@@ -1,15 +1,24 @@
 package org.near.nearconnect.example
 
 import android.os.Bundle
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.flow.receiveAsFlow
+import kotlinx.coroutines.launch
 import org.near.nearconnect.NEARWalletManager
 
 class MainActivity : ComponentActivity() {
     private lateinit var walletManager: NEARWalletManager
+    private val errorChannel = Channel<String>(Channel.UNLIMITED)
     private var pendingBLEPermissionCallback: ((Boolean) -> Unit)? = null
 
     private val blePermissionLauncher = registerForActivityResult(
@@ -23,6 +32,23 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         walletManager = NEARWalletManager(applicationContext)
+        lifecycleScope.launch {
+            walletManager.lastError.filterNotNull().collect { error ->
+                errorChannel.trySend(error)
+            }
+        }
+
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                errorChannel.receiveAsFlow().collect { error ->
+                    Toast.makeText(
+                        this@MainActivity,
+                        error,
+                        Toast.LENGTH_LONG,
+                    ).show()
+                }
+            }
+        }
 
         // Request BLE permissions on-demand when the Ledger plugin needs them
         walletManager.blePermissionRequester = { permissions, onResult ->
@@ -37,5 +63,10 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    override fun onDestroy() {
+        errorChannel.close()
+        super.onDestroy()
     }
 }

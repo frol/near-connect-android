@@ -1,6 +1,7 @@
 package org.near.nearconnect
 
 import android.annotation.SuppressLint
+import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
@@ -945,13 +946,11 @@ class NEARWalletManager(private val context: Context) {
             isUserGesture: Boolean,
             resultMsg: Message,
         ): Boolean {
-            // Peek at the URL from the hit test result
-            val hitResult = view.hitTestResult
-            val url = hitResult.extra
-            if (url != null && shouldOpenExternally(Uri.parse(url))) {
-                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                })
+            // Handle a known external target before creating a blank child WebView. If no app
+            // can open it, keep the current page visible and let the error reach the caller.
+            val hitUrl = view.hitTestResult.extra?.let { Uri.parse(it) }
+            if (hitUrl != null && shouldOpenExternally(hitUrl)) {
+                openExternalUrl(hitUrl)
                 return false
             }
 
@@ -1002,10 +1001,10 @@ class NEARWalletManager(private val context: Context) {
         ): Boolean {
             val url = request.url
             if (shouldOpenExternally(url)) {
-                context.startActivity(Intent(Intent.ACTION_VIEW, url).apply {
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                })
-                dismissPopup(view)
+                val opened = openExternalUrl(url)
+                if (opened || view.url.isNullOrBlank() || view.url == "about:blank") {
+                    dismissPopup(view)
+                }
                 return true
             }
             return false
@@ -1042,6 +1041,74 @@ class NEARWalletManager(private val context: Context) {
         if (externalDomains.any { host == it || host.endsWith(".$it") }) return true
 
         return false
+    }
+
+    /** Opens wallet deep links without allowing a missing app to crash the host application. */
+    private fun openExternalUrl(url: Uri): Boolean {
+        val intent = try {
+            if (url.scheme.equals("intent", ignoreCase = true)) {
+                Intent.parseUri(url.toString(), Intent.URI_INTENT_SCHEME).apply {
+                    addCategory(Intent.CATEGORY_BROWSABLE)
+                    component = null
+                    selector = null
+                }
+            } else {
+                Intent(Intent.ACTION_VIEW, url)
+            }
+        } catch (e: java.net.URISyntaxException) {
+            Log.w(TAG, "Ignoring malformed external wallet link", e)
+            reportExternalLinkError(NEARError.InvalidURL())
+            return false
+        }
+
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        try {
+            context.startActivity(intent)
+            return true
+        } catch (e: ActivityNotFoundException) {
+            // Android intent:// links can provide a web fallback when the wallet app is absent.
+            val fallbackUrl = intent.getStringExtra("browser_fallback_url")
+            if (!fallbackUrl.isNullOrBlank()) {
+                return try {
+                    context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(fallbackUrl)).apply {
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    })
+                    true
+                } catch (fallbackError: ActivityNotFoundException) {
+                    Log.w(TAG, "No app can open the external URL or its fallback", fallbackError)
+                    reportExternalLinkError()
+                    false
+                } catch (fallbackError: SecurityException) {
+                    Log.w(TAG, "Opening the external URL fallback was blocked", fallbackError)
+                    reportExternalLinkError(NEARError.ExternalLinkLaunchFailed())
+                    false
+                }
+            }
+            Log.i(TAG, "No app can open the external URL or its fallback")
+            reportExternalLinkError()
+            return false
+        } catch (e: SecurityException) {
+            Log.w(TAG, "Opening external URL was blocked", e)
+            reportExternalLinkError(NEARError.ExternalLinkLaunchFailed())
+            return false
+        }
+    }
+
+    private fun reportExternalLinkError(error: NEARError = NEARError.NoActivityHandler()) {
+        _lastError.value = error.message
+
+        val pendingSignIn = signInContinuation.also { signInContinuation = null }
+        val pendingSignInAndMessage = signInAndSignMessageContinuation.also { signInAndSignMessageContinuation = null }
+        val pendingTransaction = transactionContinuation.also { transactionContinuation = null }
+        val pendingMessage = messageContinuation.also { messageContinuation = null }
+        val pendingDelegateAction = delegateActionContinuation.also { delegateActionContinuation = null }
+        _isBusy.value = false
+
+        pendingSignIn?.let { if (it.isActive) it.resumeWithException(error) }
+        pendingSignInAndMessage?.let { if (it.isActive) it.resumeWithException(error) }
+        pendingTransaction?.let { if (it.isActive) it.resumeWithException(error) }
+        pendingMessage?.let { if (it.isActive) it.resumeWithException(error) }
+        pendingDelegateAction?.let { if (it.isActive) it.resumeWithException(error) }
     }
 
     // MARK: - Ledger BLE Bridge
